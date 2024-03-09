@@ -1,4 +1,3 @@
-# Spring-FirstApp
 parse_json() {
     local json=$1
     local output=""
@@ -10,6 +9,9 @@ parse_json() {
 
     # Print output without trailing newline
     printf "%s" "$output"
+
+    echo $output
+    
 }
 
 # Parse input JSON
