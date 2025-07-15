@@ -1,0 +1,194 @@
+package com.example.service;
+
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.data.mongodb.core.ReactiveMongoTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
+
+import javax.annotation.PostConstruct;
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicInteger;
+
+@Service
+public class MongoConnectionPoolMonitoringService {
+
+    private static final Logger logger = LoggerFactory.getLogger(MongoConnectionPoolMonitoringService.class);
+
+    private final ReactiveMongoTemplate mongoTemplate;
+    private final MeterRegistry meterRegistry;
+    private final Scheduler monitoringScheduler;
+    
+    // Metrics
+    private final Timer connectionAcquisitionTimer;
+    private final Counter successfulConnectionsCounter;
+    private final Counter failedConnectionsCounter;
+    private final AtomicInteger activeConnections = new AtomicInteger(0);
+    private final AtomicInteger totalConnections = new AtomicInteger(0);
+
+    public MongoConnectionPoolMonitoringService(ReactiveMongoTemplate mongoTemplate, 
+                                               MeterRegistry meterRegistry) {
+        this.mongoTemplate = mongoTemplate;
+        this.meterRegistry = meterRegistry;
+        this.monitoringScheduler = Schedulers.newSingle("pool-monitor");
+        
+        // Initialize metrics
+        this.connectionAcquisitionTimer = Timer.builder("mongodb.connection.acquisition")
+                .description("Time to acquire a connection from the pool")
+                .register(meterRegistry);
+                
+        this.successfulConnectionsCounter = Counter.builder("mongodb.connection.success")
+                .description("Number of successful connections")
+                .register(meterRegistry);
+                
+        this.failedConnectionsCounter = Counter.builder("mongodb.connection.failed")
+                .description("Number of failed connections")
+                .register(meterRegistry);
+    }
+
+    @PostConstruct
+    public void initMetrics() {
+        // Register gauges for real-time metrics
+        Gauge.builder("mongodb.connection.active")
+                .description("Number of active connections")
+                .register(meterRegistry, activeConnections, AtomicInteger::get);
+                
+        Gauge.builder("mongodb.connection.total")
+                .description("Total number of connections")
+                .register(meterRegistry, totalConnections, AtomicInteger::get);
+    }
+
+    @Scheduled(fixedRate = 30000) // Every 30 seconds
+    public void monitorConnectionPool() {
+        connectionAcquisitionTimer.recordCallable(() -> {
+            try {
+                // Test connection acquisition
+                return mongoTemplate.getCollection("healthcheck")
+                        .countDocuments()
+                        .doOnSuccess(count -> {
+                            successfulConnectionsCounter.increment();
+                            logger.debug("Connection pool health check successful. Count: {}", count);
+                        })
+                        .doOnError(error -> {
+                            failedConnectionsCounter.increment();
+                            logger.error("Connection pool health check failed", error);
+                        })
+                        .timeout(Duration.ofSeconds(5))
+                        .onErrorReturn(0L)
+                        .block();
+            } catch (Exception e) {
+                failedConnectionsCounter.increment();
+                logger.error("Connection pool monitoring failed", e);
+                return 0L;
+            }
+        });
+    }
+
+    @Scheduled(fixedRate = 10000) // Every 10 seconds
+    public void updateConnectionMetrics() {
+        // Simulate getting actual connection pool metrics
+        // In a real implementation, you would get these from the MongoDB driver
+        updateActiveConnections();
+        updateTotalConnections();
+    }
+
+    private void updateActiveConnections() {
+        // This would typically come from the MongoDB driver's connection pool
+        // For demonstration, we'll simulate it
+        int current = activeConnections.get();
+        int newValue = Math.max(0, current + (int)(Math.random() * 10) - 5);
+        activeConnections.set(newValue);
+    }
+
+    private void updateTotalConnections() {
+        // This would typically come from the MongoDB driver's connection pool
+        // For demonstration, we'll simulate it
+        int current = totalConnections.get();
+        int newValue = Math.max(activeConnections.get(), current + (int)(Math.random() * 5) - 2);
+        totalConnections.set(newValue);
+    }
+
+    public Mono<ConnectionPoolStats> getConnectionPoolStats() {
+        return Mono.fromCallable(() -> {
+            ConnectionPoolStats stats = new ConnectionPoolStats();
+            stats.setActiveConnections(activeConnections.get());
+            stats.setTotalConnections(totalConnections.get());
+            stats.setSuccessfulConnections(successfulConnectionsCounter.count());
+            stats.setFailedConnections(failedConnectionsCounter.count());
+            stats.setAverageConnectionAcquisitionTime(connectionAcquisitionTimer.mean());
+            return stats;
+        }).subscribeOn(monitoringScheduler);
+    }
+
+    public static class ConnectionPoolStats {
+        private int activeConnections;
+        private int totalConnections;
+        private double successfulConnections;
+        private double failedConnections;
+        private double averageConnectionAcquisitionTime;
+
+        // Getters and setters
+        public int getActiveConnections() { return activeConnections; }
+        public void setActiveConnections(int activeConnections) { this.activeConnections = activeConnections; }
+        
+        public int getTotalConnections() { return totalConnections; }
+        public void setTotalConnections(int totalConnections) { this.totalConnections = totalConnections; }
+        
+        public double getSuccessfulConnections() { return successfulConnections; }
+        public void setSuccessfulConnections(double successfulConnections) { this.successfulConnections = successfulConnections; }
+        
+        public double getFailedConnections() { return failedConnections; }
+        public void setFailedConnections(double failedConnections) { this.failedConnections = failedConnections; }
+        
+        public double getAverageConnectionAcquisitionTime() { return averageConnectionAcquisitionTime; }
+        public void setAverageConnectionAcquisitionTime(double averageConnectionAcquisitionTime) { 
+            this.averageConnectionAcquisitionTime = averageConnectionAcquisitionTime; 
+        }
+    }
+}
+
+// Reactive MongoDB Repository with Connection Pool Monitoring
+@Repository
+public class MonitoredReactiveRepository {
+
+    private final ReactiveMongoTemplate mongoTemplate;
+    private final MeterRegistry meterRegistry;
+    private final Timer queryTimer;
+    private final Counter queryCounter;
+
+    public MonitoredReactiveRepository(ReactiveMongoTemplate mongoTemplate, MeterRegistry meterRegistry) {
+        this.mongoTemplate = mongoTemplate;
+        this.meterRegistry = meterRegistry;
+        this.queryTimer = Timer.builder("mongodb.query.duration")
+                .description("MongoDB query execution time")
+                .register(meterRegistry);
+        this.queryCounter = Counter.builder("mongodb.query.count")
+                .description("Number of MongoDB queries executed")
+                .register(meterRegistry);
+    }
+
+    public <T> Mono<T> findById(String id, Class<T> entityClass) {
+        return queryTimer.recordCallable(() -> {
+            queryCounter.increment();
+            return mongoTemplate.findById(id, entityClass)
+                    .doOnSuccess(result -> logger.debug("Query successful for id: {}", id))
+                    .doOnError(error -> logger.error("Query failed for id: {}", id, error));
+        });
+    }
+
+    public <T> Flux<T> findAll(Class<T> entityClass) {
+        return queryTimer.recordCallable(() -> {
+            queryCounter.increment();
+            return mongoTemplate.findAll(entityClass)
+                    .doOnComplete(() -> logger.debug("FindAll query completed"))
+                    .doOnError(error -> logger.error("FindAll query failed", error));
+        });
+    }
+}
